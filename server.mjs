@@ -11,6 +11,7 @@ dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+const staticDir = path.join(__dirname, 'public');
 
 const config = {
   port: process.env.PORT || 8080,
@@ -63,18 +64,18 @@ async function renderPage(filePath, password) {
   return content;
 }
 
-app.get(['/', '/index.html', '/player.html'], async (req, res) => {
+const pageRoutes = new Map([
+  ['/', 'index.html'],
+  ['/index.html', 'index.html'],
+  ['/player.html', 'player.html'],
+  ['/about.html', 'about.html'],
+  ['/watch.html', 'watch.html']
+]);
+
+app.get(Array.from(pageRoutes.keys()), async (req, res) => {
   try {
-    let filePath;
-    switch (req.path) {
-      case '/player.html':
-        filePath = path.join(__dirname, 'player.html');
-        break;
-      default: // '/' 和 '/index.html'
-        filePath = path.join(__dirname, 'index.html');
-        break;
-    }
-    
+    const fileName = pageRoutes.get(req.path) || 'index.html';
+    const filePath = path.join(__dirname, fileName);
     const content = await renderPage(filePath, config.password);
     res.send(content);
   } catch (error) {
@@ -222,7 +223,8 @@ app.get('/proxy/:encodedUrl', async (req, res) => {
   }
 });
 
-app.use(express.static(path.join(__dirname), {
+// Vercel only serves static assets reliably from public/**.
+app.use(express.static(staticDir, {
   maxAge: config.cacheMaxAge
 }));
 

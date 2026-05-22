@@ -2,6 +2,7 @@
   "watch": [
     "server.mjs",
     "*.html",
+    "public/**/*",
     ".env"
   ],
   "ext": "js,mjs,json,html,css",
