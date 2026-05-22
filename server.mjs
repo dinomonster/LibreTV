@@ -67,9 +67,7 @@ async function renderPage(filePath, password) {
 const pageRoutes = new Map([
   ['/', 'index.html'],
   ['/index.html', 'index.html'],
-  ['/player.html', 'player.html'],
-  ['/about.html', 'about.html'],
-  ['/watch.html', 'watch.html']
+  ['/player.html', 'player.html']
 ]);
 
 app.get(Array.from(pageRoutes.keys()), async (req, res) => {
