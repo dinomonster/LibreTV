@@ -93,6 +93,7 @@ let progressSaveInterval = null; // 定期保存进度的计时器
 let currentVideoUrl = ''; // 记录当前实际的视频URL
 const isWebkit = (typeof window.webkitConvertPointFromNodeToPage === 'function')
 Artplayer.FULLSCREEN_WEB_IN_BODY = true;
+let autoSwitchInProgress = false;
 
 function isAbsoluteHttpUrl(url) {
     return typeof url === 'string' && /^https?:\/\//i.test(url);
@@ -109,6 +110,226 @@ async function buildProxyPlaybackUrl(url) {
     }
 
     return proxiedUrl;
+}
+
+function getCustomApiInfo(customApiIndex) {
+    const index = Number(customApiIndex);
+    if (!Number.isInteger(index) || index < 0) {
+        return null;
+    }
+    return customAPIs[index] || null;
+}
+
+function buildDetailApiParams(sourceKey) {
+    if (sourceKey.startsWith('custom_')) {
+        const customIndex = sourceKey.replace('custom_', '');
+        const customApi = getCustomApiInfo(customIndex);
+        if (!customApi) {
+            return null;
+        }
+
+        if (customApi.detail) {
+            return `&customApi=${encodeURIComponent(customApi.url)}&customDetail=${encodeURIComponent(customApi.detail)}&source=custom`;
+        }
+
+        return `&customApi=${encodeURIComponent(customApi.url)}&source=custom`;
+    }
+
+    return `&source=${sourceKey}`;
+}
+
+function getAutoSwitchSessionKey() {
+    return `autoSwitchTried:${encodeURIComponent(currentVideoTitle || 'unknown')}`;
+}
+
+function getTriedAutoSwitchSources() {
+    try {
+        const rawValue = sessionStorage.getItem(getAutoSwitchSessionKey());
+        const parsedValue = rawValue ? JSON.parse(rawValue) : [];
+        return Array.isArray(parsedValue) ? parsedValue : [];
+    } catch (error) {
+        return [];
+    }
+}
+
+function setTriedAutoSwitchSources(sourceKeys) {
+    try {
+        const normalizedSourceKeys = [...new Set(sourceKeys.filter(Boolean))];
+        sessionStorage.setItem(getAutoSwitchSessionKey(), JSON.stringify(normalizedSourceKeys));
+    } catch (error) {
+    }
+}
+
+function addTriedAutoSwitchSource(sourceKey) {
+    const triedSourceKeys = getTriedAutoSwitchSources();
+    triedSourceKeys.push(sourceKey);
+    setTriedAutoSwitchSources(triedSourceKeys);
+}
+
+function pickPreferredSearchResult(results) {
+    if (!Array.isArray(results) || results.length === 0) {
+        return null;
+    }
+
+    const exactMatch = results.find((result) => result?.vod_name === currentVideoTitle);
+    if (exactMatch) {
+        return exactMatch;
+    }
+
+    const partialMatch = results.find((result) => result?.vod_name && currentVideoTitle.includes(result.vod_name));
+    return partialMatch || results[0];
+}
+
+async function fetchSourceEpisodes(sourceKey, vodId) {
+    const apiParams = buildDetailApiParams(sourceKey);
+    if (!apiParams) {
+        return null;
+    }
+
+    const response = await fetch(`/api/detail?id=${encodeURIComponent(vodId)}${apiParams}&_t=${Date.now()}`, {
+        method: 'GET',
+        cache: 'no-cache'
+    });
+
+    if (!response.ok) {
+        return null;
+    }
+
+    const data = await response.json();
+    if (!data?.episodes || !Array.isArray(data.episodes) || data.episodes.length === 0) {
+        return null;
+    }
+
+    return data;
+}
+
+async function checkEpisodePlayable(episodeUrl) {
+    if (!episodeUrl) {
+        return { ok: false, status: 0 };
+    }
+
+    const proxiedUrl = await buildProxyPlaybackUrl(episodeUrl);
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 8000);
+
+    try {
+        const response = await fetch(proxiedUrl, {
+            method: 'GET',
+            cache: 'no-cache',
+            signal: controller.signal,
+            headers: {
+                'Accept': 'application/vnd.apple.mpegurl,application/x-mpegurl,text/plain,*/*'
+            }
+        });
+
+        clearTimeout(timeoutId);
+
+        if (!response.ok) {
+            return { ok: false, status: response.status };
+        }
+
+        const contentType = response.headers.get('content-type') || '';
+        const responseText = await response.text();
+        const isM3u8 = responseText.includes('#EXTM3U') || contentType.includes('mpegurl');
+        return { ok: isM3u8, status: response.status };
+    } catch (error) {
+        clearTimeout(timeoutId);
+        return { ok: false, status: 0, error };
+    }
+}
+
+async function findAlternativeSourceCandidate() {
+    const currentSource = new URLSearchParams(window.location.search).get('source') || '';
+    const excludedSourceKeys = new Set(getTriedAutoSwitchSources());
+    excludedSourceKeys.add(currentSource);
+
+    for (const sourceKey of selectedAPIs) {
+        if (excludedSourceKeys.has(sourceKey)) {
+            continue;
+        }
+
+        if (window.SourceHealth?.isSourceAvailable && !window.SourceHealth.isSourceAvailable(sourceKey)) {
+            continue;
+        }
+
+        if (!API_SITES[sourceKey] && !sourceKey.startsWith('custom_')) {
+            continue;
+        }
+
+        const queryResults = await searchByAPIAndKeyWord(sourceKey, currentVideoTitle);
+        const preferredResult = pickPreferredSearchResult(queryResults);
+        if (!preferredResult?.vod_id) {
+            addTriedAutoSwitchSource(sourceKey);
+            continue;
+        }
+
+        const detailData = await fetchSourceEpisodes(sourceKey, preferredResult.vod_id);
+        if (!detailData) {
+            addTriedAutoSwitchSource(sourceKey);
+            continue;
+        }
+
+        const targetIndex = Math.min(currentEpisodeIndex, detailData.episodes.length - 1);
+        const targetUrl = detailData.episodes[targetIndex];
+        const playableResult = await checkEpisodePlayable(targetUrl);
+
+        if (!playableResult.ok) {
+            window.SourceHealth?.markSourceUnavailable?.(sourceKey, { statusCode: playableResult.status, reason: 'playback_unavailable' });
+            addTriedAutoSwitchSource(sourceKey);
+            continue;
+        }
+
+        window.SourceHealth?.markSourceAvailable?.(sourceKey);
+
+        return {
+            sourceKey,
+            vodId: preferredResult.vod_id,
+            targetIndex,
+            targetUrl,
+            episodes: detailData.episodes,
+            videoTitle: detailData.videoInfo?.title || preferredResult.vod_name || currentVideoTitle
+        };
+    }
+
+    return null;
+}
+
+async function tryAutoSwitchSource(failedStatusCode) {
+    if (autoSwitchInProgress) {
+        return true;
+    }
+
+    autoSwitchInProgress = true;
+    const currentSource = new URLSearchParams(window.location.search).get('source') || '';
+    window.SourceHealth?.markSourceUnavailable?.(currentSource, { statusCode: failedStatusCode, reason: 'current_source_failed' });
+    addTriedAutoSwitchSource(currentSource);
+
+    showLoading('当前资源失效，正在尝试其他资源...');
+    showToast('当前资源失效，正在尝试其他资源', 'warning');
+
+    try {
+        const alternativeCandidate = await findAlternativeSourceCandidate();
+        if (!alternativeCandidate) {
+            hideLoading();
+            autoSwitchInProgress = false;
+            return false;
+        }
+
+        addTriedAutoSwitchSource(alternativeCandidate.sourceKey);
+        localStorage.setItem('currentVideoTitle', alternativeCandidate.videoTitle || currentVideoTitle);
+        localStorage.setItem('currentEpisodes', JSON.stringify(alternativeCandidate.episodes));
+        localStorage.setItem('currentEpisodeIndex', alternativeCandidate.targetIndex);
+        localStorage.setItem('currentSourceCode', alternativeCandidate.sourceKey);
+        localStorage.setItem('lastPlayTime', Date.now());
+
+        const watchUrl = `player.html?id=${alternativeCandidate.vodId}&source=${alternativeCandidate.sourceKey}&url=${encodeURIComponent(alternativeCandidate.targetUrl)}&index=${alternativeCandidate.targetIndex}&title=${encodeURIComponent(alternativeCandidate.videoTitle || currentVideoTitle)}`;
+        window.location.replace(watchUrl);
+        return true;
+    } catch (error) {
+        hideLoading();
+        autoSwitchInProgress = false;
+        return false;
+    }
 }
 
 // 页面加载
@@ -530,6 +751,8 @@ async function initPlayer(videoUrl) {
                 // 监听视频播放事件
                 video.addEventListener('playing', function () {
                     playbackStarted = true;
+                    const currentSourceKey = new URLSearchParams(window.location.search).get('source') || '';
+                    window.SourceHealth?.markSourceAvailable?.(currentSourceKey);
                     document.getElementById('player-loading').style.display = 'none';
                     document.getElementById('error').style.display = 'none';
                 });
@@ -590,7 +813,11 @@ async function initPlayer(videoUrl) {
                                 if (errorCount >= 2 && !errorDisplayed) {
                                     errorDisplayed = true;
                                     const statusCode = data.response?.code || data.response?.status || data.networkDetails?.status;
-                                    showError(`视频资源不可用${statusCode ? ` (${statusCode})` : ''}`);
+                                    tryAutoSwitchSource(statusCode).then((switched) => {
+                                        if (!switched) {
+                                            showError(`视频资源不可用${statusCode ? ` (${statusCode})` : ''}`);
+                                        }
+                                    });
                                     return;
                                 }
                                 hls.startLoad();
@@ -1533,41 +1760,9 @@ function renderResourceInfoBar() {
 async function testVideoSourceSpeed(sourceKey, vodId) {
     try {
         const startTime = performance.now();
-        
-        // 构建API参数
-        let apiParams = '';
-        if (sourceKey.startsWith('custom_')) {
-            const customIndex = sourceKey.replace('custom_', '');
-            const customApi = getCustomApiInfo(customIndex);
-            if (!customApi) {
-                return { speed: -1, error: 'API配置无效' };
-            }
-            if (customApi.detail) {
-                apiParams = '&customApi=' + encodeURIComponent(customApi.url) + '&customDetail=' + encodeURIComponent(customApi.detail) + '&source=custom';
-            } else {
-                apiParams = '&customApi=' + encodeURIComponent(customApi.url) + '&source=custom';
-            }
-        } else {
-            apiParams = '&source=' + sourceKey;
-        }
-        
-        // 添加时间戳防止缓存
-        const timestamp = new Date().getTime();
-        const cacheBuster = `&_t=${timestamp}`;
-        
-        // 获取视频详情
-        const response = await fetch(`/api/detail?id=${encodeURIComponent(vodId)}${apiParams}${cacheBuster}`, {
-            method: 'GET',
-            cache: 'no-cache'
-        });
-        
-        if (!response.ok) {
-            return { speed: -1, error: '获取失败' };
-        }
-        
-        const data = await response.json();
-        
-        if (!data.episodes || data.episodes.length === 0) {
+
+        const data = await fetchSourceEpisodes(sourceKey, vodId);
+        if (!data) {
             return { speed: -1, error: '无播放源' };
         }
         
@@ -1577,20 +1772,21 @@ async function testVideoSourceSpeed(sourceKey, vodId) {
             return { speed: -1, error: '链接无效' };
         }
         
-        // 测试视频链接响应时间
-        const videoTestStart = performance.now();
         try {
-            const videoResponse = await fetch(firstEpisodeUrl, {
-                method: 'HEAD',
-                mode: 'no-cors',
-                cache: 'no-cache',
-                signal: AbortSignal.timeout(5000) // 5秒超时
-            });
-            
+            const playableResult = await checkEpisodePlayable(firstEpisodeUrl);
             const videoTestEnd = performance.now();
             const totalTime = videoTestEnd - startTime;
-            
-            // 返回总响应时间（毫秒）
+
+            if (!playableResult.ok) {
+                window.SourceHealth?.markSourceUnavailable?.(sourceKey, { statusCode: playableResult.status, reason: 'speed_test_failed' });
+                return {
+                    speed: -1,
+                    error: playableResult.status ? `状态码 ${playableResult.status}` : '链接失效'
+                };
+            }
+
+            window.SourceHealth?.markSourceAvailable?.(sourceKey);
+
             return { 
                 speed: Math.round(totalTime),
                 episodes: data.episodes.length,
@@ -1651,7 +1847,9 @@ async function showSwitchResourceModal() {
     modal.classList.remove('hidden');
 
     // 搜索
-    const resourceOptions = selectedAPIs.map((curr) => {
+    const resourceOptions = selectedAPIs
+    .filter((curr) => window.SourceHealth?.isSourceAvailable ? window.SourceHealth.isSourceAvailable(curr) : true)
+    .map((curr) => {
         if (API_SITES[curr]) {
             return { key: curr, name: API_SITES[curr].name };
         }
@@ -1689,7 +1887,15 @@ async function showSwitchResourceModal() {
     }));
 
     // 对结果进行排序
-    const sortedResults = Object.entries(allResults).sort(([keyA, resultA], [keyB, resultB]) => {
+    const sortedResults = Object.entries(allResults)
+    .filter(([sourceKey]) => {
+        const speedResult = speedResults[sourceKey];
+        if (speedResult?.speed === -1) {
+            return false;
+        }
+        return window.SourceHealth?.isSourceAvailable ? window.SourceHealth.isSourceAvailable(sourceKey) : true;
+    })
+    .sort(([keyA, resultA], [keyB, resultB]) => {
         // 当前播放的源放在最前面
         const isCurrentA = String(keyA) === String(currentSourceCode) && String(resultA.vod_id) === String(currentVideoId);
         const isCurrentB = String(keyB) === String(currentSourceCode) && String(resultB.vod_id) === String(currentVideoId);
@@ -1762,27 +1968,11 @@ async function switchToResource(sourceKey, vodId) {
     
     showLoading();
     try {
-        // 构建API参数
-        let apiParams = '';
-        
-        // 处理自定义API源
-        if (sourceKey.startsWith('custom_')) {
-            const customIndex = sourceKey.replace('custom_', '');
-            const customApi = getCustomApiInfo(customIndex);
-            if (!customApi) {
-                showToast('自定义API配置无效', 'error');
-                hideLoading();
-                return;
-            }
-            // 传递 detail 字段
-            if (customApi.detail) {
-                apiParams = '&customApi=' + encodeURIComponent(customApi.url) + '&customDetail=' + encodeURIComponent(customApi.detail) + '&source=custom';
-            } else {
-                apiParams = '&customApi=' + encodeURIComponent(customApi.url) + '&source=custom';
-            }
-        } else {
-            // 内置API
-            apiParams = '&source=' + sourceKey;
+        const apiParams = buildDetailApiParams(sourceKey);
+        if (!apiParams) {
+            showToast('自定义API配置无效', 'error');
+            hideLoading();
+            return;
         }
         
         // Add a timestamp to prevent caching
@@ -1810,6 +2000,15 @@ async function switchToResource(sourceKey, vodId) {
         
         // 获取目标集数的URL
         const targetUrl = data.episodes[targetIndex];
+        const playableResult = await checkEpisodePlayable(targetUrl);
+        if (!playableResult.ok) {
+            window.SourceHealth?.markSourceUnavailable?.(sourceKey, { statusCode: playableResult.status, reason: 'manual_switch_failed' });
+            showToast('该资源已失效，已从列表中隐藏', 'warning');
+            hideLoading();
+            return;
+        }
+
+        window.SourceHealth?.markSourceAvailable?.(sourceKey);
         
         // 构建播放页面URL
         const watchUrl = `player.html?id=${vodId}&source=${sourceKey}&url=${encodeURIComponent(targetUrl)}&index=${targetIndex}&title=${encodeURIComponent(currentVideoTitle)}`;

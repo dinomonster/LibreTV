@@ -21,7 +21,19 @@ let currentVideoTitle = '';
 // 全局变量用于倒序状态
 let episodesReversed = false;
 
+function isBuiltInSourceVisible(apiId) {
+    return window.SourceHealth?.isSourceAvailable ? window.SourceHealth.isSourceAvailable(apiId) : true;
+}
+
 function getAvailableBuiltInApiIds(includeAdult = false) {
+    const apiIds = window.API_SOURCE_REGISTRY?.getBuiltInApiIds
+        ? window.API_SOURCE_REGISTRY.getBuiltInApiIds({ includeAdult })
+        : Object.keys(API_SITES).filter((apiId) => includeAdult || !API_SITES[apiId].adult);
+
+    return apiIds.filter((apiId) => isBuiltInSourceVisible(apiId));
+}
+
+function getAllBuiltInApiIds(includeAdult = false) {
     if (window.API_SOURCE_REGISTRY?.getBuiltInApiIds) {
         return window.API_SOURCE_REGISTRY.getBuiltInApiIds({ includeAdult });
     }
@@ -34,8 +46,10 @@ function getAvailableCustomApiIds() {
 }
 
 function getDefaultSelectedApiIds() {
+    const availableBuiltInApiIds = new Set(getAvailableBuiltInApiIds(true));
+
     if (window.API_SOURCE_REGISTRY?.getDefaultApiSelection) {
-        const preferredApiIds = window.API_SOURCE_REGISTRY.getDefaultApiSelection();
+        const preferredApiIds = window.API_SOURCE_REGISTRY.getDefaultApiSelection().filter((apiId) => availableBuiltInApiIds.has(apiId));
         if (preferredApiIds.length > 0) {
             return preferredApiIds;
         }
@@ -153,7 +167,7 @@ function initAPICheckboxes() {
     normaldiv.appendChild(normalTitle);
 
     // 创建普通API源的复选框
-    Object.keys(API_SITES).forEach(apiKey => {
+    getAvailableBuiltInApiIds(false).forEach(apiKey => {
         const api = API_SITES[apiKey];
         if (api.adult) return; // 跳过成人内容API，稍后添加
 
@@ -205,7 +219,7 @@ function addAdultAPI() {
         adultdiv.appendChild(adultTitle);
 
         // 创建成人API源的复选框
-        Object.keys(API_SITES).forEach(apiKey => {
+        getAvailableBuiltInApiIds(true).forEach(apiKey => {
             const api = API_SITES[apiKey];
             if (!api.adult) return; // 仅添加成人内容API
 
