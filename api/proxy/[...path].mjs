@@ -136,6 +136,38 @@ function getRandomUserAgent() {
     return USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
 }
 
+function getProxyReferer(targetUrl, requestHeaders) {
+    if (requestHeaders['referer']) {
+        return requestHeaders['referer'];
+    }
+
+    try {
+        const { hostname, origin } = new URL(targetUrl);
+        if (hostname.endsWith('doubanio.com')) {
+            return 'https://movie.douban.com/';
+        }
+        return origin;
+    } catch {
+        return undefined;
+    }
+}
+
+function isTextLikeContentType(contentType) {
+    if (!contentType) {
+        return false;
+    }
+
+    return (
+        contentType.startsWith('text/') ||
+        contentType.includes('application/json') ||
+        contentType.includes('application/javascript') ||
+        contentType.includes('application/xml') ||
+        contentType.includes('application/vnd.apple.mpegurl') ||
+        contentType.includes('application/x-mpegurl') ||
+        contentType.includes('audio/mpegurl')
+    );
+}
+
 async function fetchContentWithType(targetUrl, requestHeaders) {
     // 准备请求头
     const headers = {
@@ -143,7 +175,7 @@ async function fetchContentWithType(targetUrl, requestHeaders) {
         'Accept': requestHeaders['accept'] || '*/*', // 传递原始 Accept 头（如果有）
         'Accept-Language': requestHeaders['accept-language'] || 'zh-CN,zh;q=0.9,en;q=0.8',
         // 尝试设置一个合理的 Referer
-        'Referer': requestHeaders['referer'] || new URL(targetUrl).origin,
+        'Referer': getProxyReferer(targetUrl, requestHeaders),
     };
     // 清理空值的头
     Object.keys(headers).forEach(key => headers[key] === undefined || headers[key] === null || headers[key] === '' ? delete headers[key] : {});
@@ -164,12 +196,15 @@ async function fetchContentWithType(targetUrl, requestHeaders) {
             throw err; // 抛出错误
         }
 
-        // 读取响应内容
-        const content = await response.text();
         const contentType = response.headers.get('content-type') || '';
+        const isTextResponse = isTextLikeContentType(contentType);
+        const content = isTextResponse
+            ? await response.text()
+            : Buffer.from(await response.arrayBuffer());
+
         logDebug(`请求成功: ${targetUrl}, Content-Type: ${contentType}, 内容长度: ${content.length}`);
         // 返回结果
-        return { content, contentType, responseHeaders: response.headers };
+        return { content, contentType, responseHeaders: response.headers, isTextResponse };
 
     } catch (error) {
         // 捕获 fetch 本身的错误（网络、超时等）或上面抛出的 HTTP 错误

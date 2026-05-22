@@ -530,6 +530,15 @@ async function loadDoubanProxyImage(img) {
 
 window.loadDoubanProxyImage = loadDoubanProxyImage;
 
+function initializeDoubanCardImages(container) {
+    if (!container) return;
+
+    const images = container.querySelectorAll('img[data-encoded-cover]');
+    images.forEach((img) => {
+        loadDoubanProxyImage(img);
+    });
+}
+
 // 抽取渲染豆瓣卡片的逻辑到单独函数
 function renderDoubanCards(data, container) {
     // 创建文档片段以提高性能
@@ -559,13 +568,12 @@ function renderDoubanCards(data, container) {
                 .replace(/</g, '&lt;')
                 .replace(/>/g, '&gt;');
             
-            const originalCoverUrl = item.cover;
-            const encodedCoverUrl = encodeURIComponent(originalCoverUrl);
+            const encodedCoverUrl = encodeURIComponent(item.cover);
             
             // 为不同设备优化卡片布局
             card.innerHTML = `
                 <div class="relative w-full aspect-[2/3] overflow-hidden cursor-pointer" onclick="fillAndSearchWithDouban('${safeTitle}')">
-                    <img src="${originalCoverUrl}" alt="${safeTitle}" 
+                    <img src="image/nomedia.png" alt="${safeTitle}" 
                         data-encoded-cover="${encodedCoverUrl}"
                         class="w-full h-full object-cover transition-transform duration-500 hover:scale-110"
                         onerror="window.loadDoubanProxyImage(this)"
@@ -596,6 +604,7 @@ function renderDoubanCards(data, container) {
     // 清空并添加所有新元素
     container.innerHTML = "";
     container.appendChild(fragment);
+    initializeDoubanCardImages(container);
 }
 
 // 重置到首页
