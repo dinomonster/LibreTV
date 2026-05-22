@@ -11,24 +11,62 @@ let currentVideoTitle = '';
 // 全局变量用于倒序状态
 let episodesReversed = false;
 
+function getAvailableBuiltInApiIds(includeAdult = false) {
+    return Object.keys(API_SITES).filter((apiId) => includeAdult || !API_SITES[apiId].adult);
+}
+
+function getAvailableCustomApiIds() {
+    return customAPIs.map((_, index) => `custom_${index}`);
+}
+
+function normalizeSelectedAPIs({ fallbackToAvailable = true } = {}) {
+    const availableBuiltInApiIds = getAvailableBuiltInApiIds(true);
+    const availableCustomApiIds = getAvailableCustomApiIds();
+
+    let normalizedApiIds = selectedAPIs.filter((apiId) => {
+        if (apiId.startsWith('custom_')) {
+            return availableCustomApiIds.includes(apiId);
+        }
+        return availableBuiltInApiIds.includes(apiId);
+    });
+
+    if (normalizedApiIds.length === 0 && fallbackToAvailable) {
+        normalizedApiIds = getAvailableBuiltInApiIds(false);
+        if (normalizedApiIds.length === 0 && availableCustomApiIds.length > 0) {
+            normalizedApiIds = [availableCustomApiIds[0]];
+        }
+    }
+
+    selectedAPIs = [...new Set(normalizedApiIds)];
+    localStorage.setItem('selectedAPIs', JSON.stringify(selectedAPIs));
+    return selectedAPIs;
+}
+
+function syncSelectedAPIsToUI() {
+    document.querySelectorAll('#apiCheckboxes input[type="checkbox"]').forEach((checkbox) => {
+        checkbox.checked = selectedAPIs.includes(checkbox.dataset.api);
+    });
+
+    document.querySelectorAll('#customApisList input[type="checkbox"]').forEach((checkbox) => {
+        checkbox.checked = selectedAPIs.includes(`custom_${checkbox.dataset.customIndex}`);
+    });
+
+    updateSelectedApiCount();
+}
+
+function ensureSearchableApisSelected() {
+    normalizeSelectedAPIs();
+    syncSelectedAPIsToUI();
+    return selectedAPIs;
+}
+
+window.ensureSearchableApisSelected = ensureSearchableApisSelected;
+
 // 页面初始化
 document.addEventListener('DOMContentLoaded', function () {
-    // 初始化API复选框
-    initAPICheckboxes();
-
-    // 初始化自定义API列表
-    renderCustomAPIsList();
-
-    // 初始化显示选中的API数量
-    updateSelectedApiCount();
-
-    // 渲染搜索历史
-    renderSearchHistory();
-
     // 设置默认API选择（如果是第一次加载）
     if (!localStorage.getItem('hasInitializedDefaults')) {
-        // 默认选中资源
-        selectedAPIs = ["tyyszy", "bfzy", "dyttzy", "ruyi"];
+        selectedAPIs = getAvailableBuiltInApiIds(false);
         localStorage.setItem('selectedAPIs', JSON.stringify(selectedAPIs));
 
         // 默认选中过滤开关
@@ -41,6 +79,20 @@ document.addEventListener('DOMContentLoaded', function () {
         // 标记已初始化默认值
         localStorage.setItem('hasInitializedDefaults', 'true');
     }
+
+    normalizeSelectedAPIs();
+
+    // 初始化API复选框
+    initAPICheckboxes();
+
+    // 初始化自定义API列表
+    renderCustomAPIsList();
+
+    // 同步已选源到界面
+    syncSelectedAPIsToUI();
+
+    // 渲染搜索历史
+    renderSearchHistory();
 
     // 设置黄色内容过滤器开关初始状态
     const yellowFilterToggle = document.getElementById('yellowFilterToggle');
