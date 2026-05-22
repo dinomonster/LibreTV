@@ -21,17 +21,15 @@ const SITE_CONFIG = {
 };
 
 // API站点配置
-const API_SITES = {
-    testSource: {
-        api: 'https://www.example.com/api.php/provide/vod',
-        name: '空内容测试源',
-        adult: true
-    }
-    //ARCHIVE https://telegra.ph/APIs-08-12
-};
+const API_SITES = window.API_SOURCE_REGISTRY
+    ? window.API_SOURCE_REGISTRY.buildSourceMap()
+    : {};
 
 // 定义合并方法
 function extendAPISites(newSites) {
+    if (window.API_SOURCE_REGISTRY?.registerBuiltinSources) {
+        window.API_SOURCE_REGISTRY.registerBuiltinSources(newSites);
+    }
     Object.assign(API_SITES, newSites);
 }
 

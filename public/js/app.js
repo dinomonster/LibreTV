@@ -1,6 +1,16 @@
+function parseStoredJson(key, fallbackValue) {
+    try {
+        const rawValue = localStorage.getItem(key);
+        return rawValue ? JSON.parse(rawValue) : fallbackValue;
+    } catch (error) {
+        console.warn(`解析本地存储失败: ${key}`, error);
+        return fallbackValue;
+    }
+}
+
 // 全局变量
-let selectedAPIs = JSON.parse(localStorage.getItem('selectedAPIs') || '["tyyszy","dyttzy", "bfzy", "ruyi"]'); // 默认选中资源
-let customAPIs = JSON.parse(localStorage.getItem('customAPIs') || '[]'); // 存储自定义API列表
+let selectedAPIs = parseStoredJson('selectedAPIs', []);
+let customAPIs = parseStoredJson('customAPIs', []);
 
 // 添加当前播放的集数索引
 let currentEpisodeIndex = 0;
@@ -12,11 +22,26 @@ let currentVideoTitle = '';
 let episodesReversed = false;
 
 function getAvailableBuiltInApiIds(includeAdult = false) {
+    if (window.API_SOURCE_REGISTRY?.getBuiltInApiIds) {
+        return window.API_SOURCE_REGISTRY.getBuiltInApiIds({ includeAdult });
+    }
+
     return Object.keys(API_SITES).filter((apiId) => includeAdult || !API_SITES[apiId].adult);
 }
 
 function getAvailableCustomApiIds() {
     return customAPIs.map((_, index) => `custom_${index}`);
+}
+
+function getDefaultSelectedApiIds() {
+    if (window.API_SOURCE_REGISTRY?.getDefaultApiSelection) {
+        const preferredApiIds = window.API_SOURCE_REGISTRY.getDefaultApiSelection();
+        if (preferredApiIds.length > 0) {
+            return preferredApiIds;
+        }
+    }
+
+    return getAvailableBuiltInApiIds(false);
 }
 
 function normalizeSelectedAPIs({ fallbackToAvailable = true } = {}) {
@@ -31,7 +56,7 @@ function normalizeSelectedAPIs({ fallbackToAvailable = true } = {}) {
     });
 
     if (normalizedApiIds.length === 0 && fallbackToAvailable) {
-        normalizedApiIds = getAvailableBuiltInApiIds(false);
+        normalizedApiIds = getDefaultSelectedApiIds();
         if (normalizedApiIds.length === 0 && availableCustomApiIds.length > 0) {
             normalizedApiIds = [availableCustomApiIds[0]];
         }
@@ -66,7 +91,7 @@ window.ensureSearchableApisSelected = ensureSearchableApisSelected;
 document.addEventListener('DOMContentLoaded', function () {
     // 设置默认API选择（如果是第一次加载）
     if (!localStorage.getItem('hasInitializedDefaults')) {
-        selectedAPIs = getAvailableBuiltInApiIds(false);
+        selectedAPIs = getDefaultSelectedApiIds();
         localStorage.setItem('selectedAPIs', JSON.stringify(selectedAPIs));
 
         // 默认选中过滤开关
