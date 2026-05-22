@@ -74,7 +74,7 @@ const pageRoutes = new Map([
 app.get(Array.from(pageRoutes.keys()), async (req, res) => {
   try {
     const fileName = pageRoutes.get(req.path) || 'index.html';
-    const filePath = path.join(__dirname, fileName);
+    const filePath = path.join(staticDir, fileName);
     const content = await renderPage(filePath, config.password);
     res.send(content);
   } catch (error) {
@@ -85,7 +85,7 @@ app.get(Array.from(pageRoutes.keys()), async (req, res) => {
 
 app.get('/s=:keyword', async (req, res) => {
   try {
-    const filePath = path.join(__dirname, 'index.html');
+    const filePath = path.join(staticDir, 'index.html');
     const content = await renderPage(filePath, config.password);
     res.send(content);
   } catch (error) {
