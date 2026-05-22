@@ -57,21 +57,25 @@ async function getPasswordHash() {
 /**
  * 为代理请求URL添加鉴权参数
  */
-async function addAuthToProxyUrl(url) {
+async function addAuthToProxyUrl(url, options = {}) {
     try {
+        const { includeTimestamp = true } = options;
         const hash = await getPasswordHash();
         if (!hash) {
             console.warn('无法获取密码哈希，代理请求可能失败');
             return url;
         }
         
-        // 添加时间戳防止重放攻击
-        const timestamp = Date.now();
-        
         // 检查URL是否已包含查询参数
         const separator = url.includes('?') ? '&' : '?';
-        
-        return `${url}${separator}auth=${encodeURIComponent(hash)}&t=${timestamp}`;
+        let authUrl = `${url}${separator}auth=${encodeURIComponent(hash)}`;
+
+        if (includeTimestamp) {
+            const timestamp = Date.now();
+            authUrl += `&t=${timestamp}`;
+        }
+
+        return authUrl;
     } catch (error) {
         console.error('添加代理鉴权失败:', error);
         return url;

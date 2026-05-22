@@ -94,6 +94,23 @@ let currentVideoUrl = ''; // 记录当前实际的视频URL
 const isWebkit = (typeof window.webkitConvertPointFromNodeToPage === 'function')
 Artplayer.FULLSCREEN_WEB_IN_BODY = true;
 
+function isAbsoluteHttpUrl(url) {
+    return typeof url === 'string' && /^https?:\/\//i.test(url);
+}
+
+async function buildProxyPlaybackUrl(url) {
+    if (!isAbsoluteHttpUrl(url) || url.startsWith(PROXY_URL)) {
+        return url;
+    }
+
+    const proxiedUrl = `${PROXY_URL}${encodeURIComponent(url)}`;
+    if (window.ProxyAuth?.addAuthToProxyUrl) {
+        return window.ProxyAuth.addAuthToProxyUrl(proxiedUrl, { includeTimestamp: false });
+    }
+
+    return proxiedUrl;
+}
+
 // 页面加载
 document.addEventListener('DOMContentLoaded', function () {
     // 先检查用户是否已通过密码验证
@@ -397,7 +414,7 @@ function showShortcutHint(text, direction) {
 }
 
 // 初始化播放器
-function initPlayer(videoUrl) {
+async function initPlayer(videoUrl) {
     if (!videoUrl) {
         return
     }
@@ -437,10 +454,18 @@ function initPlayer(videoUrl) {
         liveDurationInfinity: false
     };
 
+    let playerUrl = videoUrl;
+    try {
+        playerUrl = await buildProxyPlaybackUrl(videoUrl);
+    } catch (error) {
+        showError('视频代理初始化失败，请刷新后重试');
+        return;
+    }
+
     // Create new ArtPlayer instance
     art = new Artplayer({
         container: '#player',
-        url: videoUrl,
+        url: playerUrl,
         type: 'm3u8',
         title: videoTitle,
         volume: 0.8,
@@ -472,7 +497,7 @@ function initPlayer(videoUrl) {
             crossOrigin: 'anonymous',
         },
         customType: {
-            m3u8: function (video, url) {
+            m3u8: async function (video, url) {
                 // 清理之前的HLS实例
                 if (currentHls && currentHls.destroy) {
                     try {
@@ -493,6 +518,14 @@ function initPlayer(videoUrl) {
                 let playbackStarted = false;
                 // 跟踪视频是否出现bufferAppendError
                 let bufferAppendErrorCount = 0;
+                let playbackUrl = url;
+
+                try {
+                    playbackUrl = await buildProxyPlaybackUrl(url);
+                } catch (error) {
+                    showError('视频代理初始化失败，请刷新后重试');
+                    return;
+                }
 
                 // 监听视频播放事件
                 video.addEventListener('playing', function () {
@@ -509,7 +542,7 @@ function initPlayer(videoUrl) {
                     }
                 });
 
-                hls.loadSource(url);
+                hls.loadSource(playbackUrl);
                 hls.attachMedia(video);
 
                 // enable airplay, from https://github.com/video-dev/hls.js/issues/5989
@@ -517,11 +550,11 @@ function initPlayer(videoUrl) {
                 let sourceElement = video.querySelector('source');
                 if (sourceElement) {
                     // 更新现有source元素的URL
-                    sourceElement.src = videoUrl;
+                    sourceElement.src = playbackUrl;
                 } else {
                     // 创建新的source元素
                     sourceElement = document.createElement('source');
-                    sourceElement.src = videoUrl;
+                    sourceElement.src = playbackUrl;
                     video.appendChild(sourceElement);
                 }
                 video.disableRemotePlayback = false;
@@ -554,6 +587,12 @@ function initPlayer(videoUrl) {
                         // 尝试恢复错误
                         switch (data.type) {
                             case Hls.ErrorTypes.NETWORK_ERROR:
+                                if (errorCount >= 2 && !errorDisplayed) {
+                                    errorDisplayed = true;
+                                    const statusCode = data.response?.code || data.response?.status || data.networkDetails?.status;
+                                    showError(`视频资源不可用${statusCode ? ` (${statusCode})` : ''}`);
+                                    return;
+                                }
                                 hls.startLoad();
                                 break;
                             case Hls.ErrorTypes.MEDIA_ERROR:
@@ -885,7 +924,7 @@ function renderEpisodes() {
 }
 
 // 播放指定集数
-function playEpisode(index) {
+async function playEpisode(index) {
     // 确保index在有效范围内
     if (index < 0 || index >= currentEpisodes.length) {
         return;
@@ -935,7 +974,12 @@ function playEpisode(index) {
     if (isWebkit) {
         initPlayer(url);
     } else {
-        art.switch = url;
+        try {
+            art.switch = await buildProxyPlaybackUrl(url);
+        } catch (error) {
+            showError('视频代理初始化失败，请刷新后重试');
+            return;
+        }
     }
 
     // 更新UI
