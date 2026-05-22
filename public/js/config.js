@@ -29,6 +29,9 @@ const API_SITES = window.API_SOURCE_REGISTRY
 function extendAPISites(newSites) {
     if (window.API_SOURCE_REGISTRY?.registerBuiltinSources) {
         window.API_SOURCE_REGISTRY.registerBuiltinSources(newSites);
+        Object.keys(API_SITES).forEach((key) => delete API_SITES[key]);
+        Object.assign(API_SITES, window.API_SOURCE_REGISTRY.buildSourceMap());
+        return;
     }
     Object.assign(API_SITES, newSites);
 }

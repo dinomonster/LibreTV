@@ -4,7 +4,8 @@ const BUILT_IN_API_SOURCE_DEFINITIONS = [
         api: 'https://www.qiqidys.com/api.php/provide/vod',
         name: '七七资源',
         priority: 100,
-        defaultSelected: true,
+        defaultSelected: false,
+        enabled: false,
     },
     {
         id: 'ruyi',
@@ -25,7 +26,8 @@ const BUILT_IN_API_SOURCE_DEFINITIONS = [
         api: 'https://tyyszy.com/api.php/provide/vod',
         name: '天涯资源',
         priority: 85,
-        defaultSelected: true,
+        defaultSelected: false,
+        enabled: false,
     },
     {
         id: 'ffzy',
@@ -40,7 +42,7 @@ const BUILT_IN_API_SOURCE_DEFINITIONS = [
         api: 'https://cj.lziapi.com/api.php/provide/vod/',
         name: '量子资源站',
         priority: 75,
-        defaultSelected: true,
+        defaultSelected: false,
     },
     {
         id: 'zy360',
@@ -54,14 +56,14 @@ const BUILT_IN_API_SOURCE_DEFINITIONS = [
         api: 'https://dbzy.tv/api.php/provide/vod',
         name: '豆瓣资源',
         priority: 65,
-        defaultSelected: false,
+        defaultSelected: true,
     },
     {
         id: 'wujin',
         api: 'https://api.wujinapi.me/api.php/provide/vod',
         name: '无尽资源',
         priority: 60,
-        defaultSelected: false,
+        defaultSelected: true,
     },
     {
         id: 'ikun',
@@ -75,7 +77,7 @@ const BUILT_IN_API_SOURCE_DEFINITIONS = [
         api: 'https://api.zuidapi.com/api.php/provide/vod',
         name: '最大资源',
         priority: 50,
-        defaultSelected: false,
+        defaultSelected: true,
     },
     {
         id: 'mozhua',
@@ -118,15 +120,20 @@ function normalizeSourceDefinition(id, source) {
         api: source.api,
         detail: source.detail,
         adult: source.adult === true,
+        enabled: source.enabled !== false,
         priority: Number.isFinite(source.priority) ? source.priority : 0,
         defaultSelected: source.defaultSelected === true,
     };
 }
 
+function isSourceEnabled(source) {
+    return source.enabled !== false;
+}
+
 function buildSourceMap() {
     const sourceMap = {};
 
-    sourceDefinitions.forEach((source) => {
+    sourceDefinitions.filter(isSourceEnabled).forEach((source) => {
         const { id, ...siteConfig } = source;
         sourceMap[id] = { ...siteConfig };
     });
@@ -136,6 +143,7 @@ function buildSourceMap() {
 
 function getSortedDefinitions(includeAdult = false) {
     return sourceDefinitions
+        .filter(isSourceEnabled)
         .filter((source) => includeAdult || !source.adult)
         .sort((left, right) => {
             if (right.priority !== left.priority) {

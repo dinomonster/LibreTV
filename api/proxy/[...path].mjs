@@ -8,6 +8,7 @@ import crypto from 'crypto'; // 导入 crypto 模块用于密码哈希
 const DEBUG_ENABLED = process.env.DEBUG === 'true';
 const CACHE_TTL = parseInt(process.env.CACHE_TTL || '86400', 10); // 默认 24 小时
 const MAX_RECURSION = parseInt(process.env.MAX_RECURSION || '5', 10); // 默认 5 层
+const MAX_HTML_REDIRECTS = parseInt(process.env.MAX_HTML_REDIRECTS || '3', 10);
 
 // --- User Agent 处理 ---
 // 默认 User Agent 列表
@@ -168,7 +169,37 @@ function isTextLikeContentType(contentType) {
     );
 }
 
-async function fetchContentWithType(targetUrl, requestHeaders) {
+function extractHtmlRedirectUrl(content, baseUrl) {
+    if (!content || typeof content !== 'string') {
+        return null;
+    }
+
+    const redirectPatterns = [
+        /window\.location\.replace\(\s*['"]([^'"]+)['"]\s*\)/i,
+        /location\.replace\(\s*['"]([^'"]+)['"]\s*\)/i,
+        /window\.location(?:\.href)?\s*=\s*['"]([^'"]+)['"]/i,
+        /location\.href\s*=\s*['"]([^'"]+)['"]/i,
+        /<meta[^>]+http-equiv=["']refresh["'][^>]+content=["'][^"']*url=([^"']+)["']/i,
+    ];
+
+    for (const pattern of redirectPatterns) {
+        const match = content.match(pattern);
+        if (!match || !match[1]) {
+            continue;
+        }
+
+        const redirectTarget = match[1].replace(/&amp;/g, '&').trim();
+        if (!redirectTarget) {
+            continue;
+        }
+
+        return resolveUrl(baseUrl, redirectTarget);
+    }
+
+    return null;
+}
+
+async function fetchContentWithType(targetUrl, requestHeaders, htmlRedirectDepth = 0) {
     // 准备请求头
     const headers = {
         'User-Agent': getRandomUserAgent(),
@@ -202,6 +233,18 @@ async function fetchContentWithType(targetUrl, requestHeaders) {
             ? await response.text()
             : Buffer.from(await response.arrayBuffer());
 
+        if (isTextResponse) {
+            const redirectUrl = extractHtmlRedirectUrl(content, targetUrl);
+            if (redirectUrl) {
+                if (htmlRedirectDepth >= MAX_HTML_REDIRECTS) {
+                    throw new Error(`HTML 跳转层级超过限制 (${MAX_HTML_REDIRECTS}): ${targetUrl}`);
+                }
+
+                logDebug(`检测到 HTML 跳转: ${targetUrl} -> ${redirectUrl}`);
+                return fetchContentWithType(redirectUrl, requestHeaders, htmlRedirectDepth + 1);
+            }
+        }
+
         logDebug(`请求成功: ${targetUrl}, Content-Type: ${contentType}, 内容长度: ${content.length}`);
         // 返回结果
         return { content, contentType, responseHeaders: response.headers, isTextResponse };
@@ -210,7 +253,9 @@ async function fetchContentWithType(targetUrl, requestHeaders) {
         // 捕获 fetch 本身的错误（网络、超时等）或上面抛出的 HTTP 错误
         logDebug(`请求异常 ${targetUrl}: ${error.message}`);
         // 重新抛出，确保包含原始错误信息
-        throw new Error(`请求目标 URL 失败 ${targetUrl}: ${error.message}`);
+        const wrappedError = new Error(`请求目标 URL 失败 ${targetUrl}: ${error.message}`);
+        wrappedError.status = error.status;
+        throw wrappedError;
     }
 }
 

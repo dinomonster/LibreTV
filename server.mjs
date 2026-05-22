@@ -19,6 +19,7 @@ const config = {
   corsOrigin: process.env.CORS_ORIGIN || '*',
   timeout: parseInt(process.env.REQUEST_TIMEOUT || '5000'),
   maxRetries: parseInt(process.env.MAX_RETRIES || '2'),
+  maxHtmlRedirects: parseInt(process.env.MAX_HTML_REDIRECTS || '3'),
   cacheMaxAge: process.env.CACHE_MAX_AGE || '1d',
   userAgent: process.env.USER_AGENT || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
   debug: process.env.DEBUG === 'true'
@@ -133,6 +134,114 @@ function getProxyReferer(targetUrl, requestHeaders = {}) {
   }
 }
 
+function isTextLikeContentType(contentType = '') {
+  return (
+    contentType.startsWith('text/') ||
+    contentType.includes('application/json') ||
+    contentType.includes('application/javascript') ||
+    contentType.includes('application/xml') ||
+    contentType.includes('application/vnd.apple.mpegurl') ||
+    contentType.includes('application/x-mpegurl') ||
+    contentType.includes('audio/mpegurl')
+  );
+}
+
+function extractHtmlRedirectUrl(content, baseUrl) {
+  if (!content || typeof content !== 'string') {
+    return null;
+  }
+
+  const redirectPatterns = [
+    /window\.location\.replace\(\s*['"]([^'"]+)['"]\s*\)/i,
+    /location\.replace\(\s*['"]([^'"]+)['"]\s*\)/i,
+    /window\.location(?:\.href)?\s*=\s*['"]([^'"]+)['"]/i,
+    /location\.href\s*=\s*['"]([^'"]+)['"]/i,
+    /<meta[^>]+http-equiv=["']refresh["'][^>]+content=["'][^"']*url=([^"']+)["']/i,
+  ];
+
+  for (const pattern of redirectPatterns) {
+    const match = content.match(pattern);
+    if (!match || !match[1]) {
+      continue;
+    }
+
+    const redirectTarget = match[1].replace(/&amp;/g, '&').trim();
+    if (!redirectTarget) {
+      continue;
+    }
+
+    try {
+      return new URL(redirectTarget, baseUrl).toString();
+    } catch {
+      return redirectTarget;
+    }
+  }
+
+  return null;
+}
+
+async function fetchProxyContent(targetUrl, requestHeaders = {}, retries = 0, htmlRedirectDepth = 0) {
+  try {
+    const response = await axios({
+      method: 'get',
+      url: targetUrl,
+      responseType: 'arraybuffer',
+      timeout: config.timeout,
+      maxRedirects: 5,
+      validateStatus: () => true,
+      headers: {
+        'User-Agent': config.userAgent,
+        'Referer': getProxyReferer(targetUrl, requestHeaders)
+      }
+    });
+
+    const contentType = response.headers['content-type'] || '';
+    const responseBuffer = Buffer.from(response.data);
+
+    if (response.status < 200 || response.status >= 300) {
+      const error = new Error(`HTTP ${response.status}: ${response.statusText || 'Upstream Error'}`);
+      error.status = response.status;
+      error.responseData = responseBuffer;
+      error.responseHeaders = response.headers;
+      throw error;
+    }
+
+    if (isTextLikeContentType(contentType)) {
+      const textContent = responseBuffer.toString('utf8');
+      const redirectUrl = extractHtmlRedirectUrl(textContent, targetUrl);
+
+      if (redirectUrl) {
+        if (htmlRedirectDepth >= config.maxHtmlRedirects) {
+          throw new Error(`HTML 跳转层级超过限制 (${config.maxHtmlRedirects}): ${targetUrl}`);
+        }
+
+        log(`检测到 HTML 跳转: ${targetUrl} -> ${redirectUrl}`);
+        return fetchProxyContent(redirectUrl, requestHeaders, retries, htmlRedirectDepth + 1);
+      }
+
+      return {
+        data: textContent,
+        headers: response.headers,
+        status: response.status
+      };
+    }
+
+    return {
+      data: responseBuffer,
+      headers: response.headers,
+      status: response.status
+    };
+  } catch (error) {
+    if (retries < config.maxRetries && (!error.status || error.status >= 500)) {
+      const nextRetry = retries + 1;
+      log(`重试请求 (${nextRetry}/${config.maxRetries}): ${targetUrl}`);
+      return fetchProxyContent(targetUrl, requestHeaders, nextRetry, htmlRedirectDepth);
+    }
+
+    throw error;
+  }
+}
+
 // 验证代理请求的鉴权
 function validateProxyAuth(req) {
   const authHash = req.query.auth;
@@ -187,33 +296,7 @@ app.get('/proxy/:encodedUrl', async (req, res) => {
 
     log(`代理请求: ${targetUrl}`);
 
-    // 添加请求超时和重试逻辑
-    const maxRetries = config.maxRetries;
-    let retries = 0;
-    
-    const makeRequest = async () => {
-      try {
-        return await axios({
-          method: 'get',
-          url: targetUrl,
-          responseType: 'stream',
-          timeout: config.timeout,
-          headers: {
-            'User-Agent': config.userAgent,
-            'Referer': getProxyReferer(targetUrl, req.headers)
-          }
-        });
-      } catch (error) {
-        if (retries < maxRetries) {
-          retries++;
-          log(`重试请求 (${retries}/${maxRetries}): ${targetUrl}`);
-          return makeRequest();
-        }
-        throw error;
-      }
-    };
-
-    const response = await makeRequest();
+    const response = await fetchProxyContent(targetUrl, req.headers);
 
     // 转发响应头（过滤敏感头）
     const headers = { ...response.headers };
@@ -225,13 +308,11 @@ app.get('/proxy/:encodedUrl', async (req, res) => {
     sensitiveHeaders.forEach(header => delete headers[header]);
     res.set(headers);
 
-    // 管道传输响应流
-    response.data.pipe(res);
+    res.status(response.status || 200).send(response.data);
   } catch (error) {
     console.error('代理请求错误:', error.message);
-    if (error.response) {
-      res.status(error.response.status || 500);
-      error.response.data.pipe(res);
+    if (error.responseData) {
+      res.status(error.status || 500).send(error.responseData);
     } else {
       res.status(500).send(`请求失败: ${error.message}`);
     }
